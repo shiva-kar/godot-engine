@@ -142,11 +142,9 @@ class ScriptTextEditor : public CodeEditorBase {
 	Point2i hover_tooltip_pos;
 	void _on_hover_tooltip_timer_timeout();
 	void _apply_project_settings();
-	static bool _is_line_col_in_range(int p_line, int p_column, int p_from_line, int p_from_column, int p_to_line, int p_to_column) {
-		// TODO: Duplicate of logic from TextEdit::_is_line_col_in_range, minus the include_edges logic.
-		// At some point, this function should probably be unified.
-		return (p_line >= p_from_line && p_line <= p_to_line && (p_line > p_from_line || p_column >= p_from_column) && (p_line < p_to_line || p_column <= p_to_column));
-	}
+
+	void _on_diagnostic_copy_pressed(const String &p_text);
+	void _on_diagnostic_quick_fix_pressed(Button *p_btn);
 
 	static ScriptEditorBase *create_editor(const Ref<Resource> &p_resource);
 
@@ -184,6 +182,14 @@ protected:
 	void _validate_symbol(const String &p_symbol);
 
 	void _show_symbol_tooltip(const String &p_symbol, int p_row, int p_column, bool p_shortcut = false);
+	VBoxContainer *current_diag_vbox = nullptr;
+	int current_diag_row = -1;
+
+	int _populate_diagnostic_vbox(VBoxContainer *diag_vbox, int p_row);
+	void _update_diagnostic_tooltip();
+	void _on_diag_vbox_tree_exiting();
+
+	void _lines_edited_from(int p_from_line, int p_to_line);
 
 	Variant get_drag_data_fw(const Point2 &p_point, Control *p_from);
 	bool can_drop_data_fw(const Point2 &p_point, const Variant &p_data, Control *p_from) const;

@@ -381,7 +381,6 @@ class EditorHelpBitTooltip : public PopupPanel {
 
 	static bool _is_tooltip_visible;
 
-	RichTextLabel *diagnostics_label;
 	VBoxContainer *vbox;
 
 	Timer *timer = nullptr;
@@ -399,14 +398,11 @@ protected:
 	void _notification(int p_what);
 
 public:
+	Popup *attached_popup = nullptr;
+	void set_attached_popup(Popup *p_popup) { attached_popup = p_popup; }
+
 	// The returned control is an orphan node, which is to make the standard tooltip invisible.
-	[[nodiscard]] static Control *make_tooltip(
-			Control *p_target,
-			const String &p_symbol,
-			const String &p_prologue = String(),
-			bool p_use_class_prefix = false,
-			bool p_shortcut = false,
-			const String &p_diagnostics = String());
+	[[nodiscard]] static Control *make_tooltip(Control *p_target, const String &p_symbol, const String &p_prologue = String(), bool p_use_class_prefix = false, bool p_shortcut = false, Control *p_custom_header = nullptr);
 
 	void popup_under_position(const Point2 &p_point);
 

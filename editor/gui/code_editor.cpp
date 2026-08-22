@@ -50,6 +50,7 @@
 #include "scene/gui/separator.h"
 #include "scene/main/timer.h"
 #include "scene/resources/font.h"
+#include "servers/display/display_server.h"
 
 void GotoLinePopup::popup_find_line(CodeTextEditor *p_text_editor) {
 	text_editor = p_text_editor;
@@ -2007,8 +2008,8 @@ void CodeTextEditor::update_toggle_files_button() {
 	toggle_files_button->set_tooltip_text(vformat("%s (%s)", TTR("Toggle Files Panel"), ED_GET_SHORTCUT("script_editor/toggle_files_panel")->get_as_text()));
 }
 
-Rect2 CodeTextEditor::_get_code_action_button_inline_rect() const {
-	const int line = text_editor->get_caret_line();
+Rect2 CodeTextEditor::_get_code_action_button_inline_rect(int p_line) const {
+	const int line = p_line == -1 ? text_editor->get_caret_line() : p_line;
 	const int indent_level = text_editor->get_indent_level(line);
 
 	const int line_spacing = text_editor->get_theme_constant("line_spacing");
@@ -2058,7 +2059,16 @@ void CodeTextEditor::_on_text_editor_draw() const {
 }
 
 void CodeTextEditor::_on_code_action_id_pressed(int p_id) {
+	if (p_id < 0 || p_id >= (int)ungrouped_current_code_actions.size()) {
+		return;
+	}
 	emit_signal(SNAME("document_edits_requested"), ungrouped_current_code_actions[p_id].to_dict()["document_edits"]);
+
+	if (code_action_popup) {
+		for (int i = 0; i < code_action_popup->get_item_count(); i++) {
+			code_action_popup->set_item_disabled(i, true);
+		}
+	}
 }
 
 Vector<ScriptLanguage::CodeActionGroupWithDiagnostics> CodeTextEditor::get_code_actions_for_line(int p_line) const {
@@ -2069,7 +2079,7 @@ Vector<ScriptLanguage::CodeActionGroupWithDiagnostics> CodeTextEditor::get_code_
 
 		for (const ScriptLanguage::CodeActionAndDiagnostics &action : group.actions) {
 			for (const ScriptLanguage::Warning &w : action.related_warnings) {
-				if (p_line == w.start_line - 1 && p_line <= w.end_line - 1) {
+				if (p_line == w.start_line - 1) {
 					filtered_group.actions.append(action);
 					break;
 				}
@@ -2090,27 +2100,69 @@ Vector<ScriptLanguage::CodeActionGroupWithDiagnostics> CodeTextEditor::get_code_
 	return actions_this_line;
 }
 
-void CodeTextEditor::popup_code_actions(int p_line, bool p_from_shortcut) {
+void CodeTextEditor::_update_code_action_popup() {
+	if (!code_action_popup) {
+		return;
+	}
+
+	code_action_popup->clear();
+	ungrouped_current_code_actions.clear();
+
+	int action_index = 0;
+	HashSet<String> added_actions; // Prevent duplicate actions from multiple lines
+
+	for (int p_line : current_code_action_lines) {
+		for (const ScriptLanguage::CodeActionGroupWithDiagnostics &group : get_code_actions_for_line(p_line)) {
+			// Find or add separator for group
+			bool group_exists = false;
+			for (int i = 0; i < code_action_popup->get_item_count(); i++) {
+				if (code_action_popup->is_item_separator(i) && code_action_popup->get_item_text(i) == group.title) {
+					group_exists = true;
+					break;
+				}
+			}
+			if (!group_exists) {
+				code_action_popup->add_separator(group.title, -1);
+			}
+
+			for (const ScriptLanguage::CodeActionAndDiagnostics &action : group.actions) {
+				String action_id = group.title + ":" + action.code_action.description;
+				if (!added_actions.has(action_id)) {
+					added_actions.insert(action_id);
+					code_action_popup->add_icon_item(code_action_icon, action.code_action.description, action_index);
+					ungrouped_current_code_actions.push_back(action.code_action);
+					action_index++;
+				}
+			}
+		}
+	}
+
+	if (action_index == 0) {
+		code_action_popup->hide();
+		return;
+	}
+
+	// Update the size so it shrinks if there are fewer items now.
+	code_action_popup->reset_size();
+}
+
+void CodeTextEditor::popup_code_actions(const Vector<int> &p_lines, bool p_from_shortcut, Point2i p_global_pos) {
 	if (code_action_popup == nullptr) {
 		code_action_popup = memnew(PopupMenu);
 		code_action_popup->connect(SceneStringName(id_pressed), callable_mp(this, &CodeTextEditor::_on_code_action_id_pressed));
 		add_child(code_action_popup);
 	}
-	code_action_popup->clear();
 
-	ungrouped_current_code_actions.clear();
-	int action_index = 0;
-	for (const ScriptLanguage::CodeActionGroupWithDiagnostics &group : get_code_actions_for_line(p_line)) {
-		code_action_popup->add_separator(group.title, -1);
-		for (const ScriptLanguage::CodeActionAndDiagnostics &action : group.actions) {
-			code_action_popup->add_icon_item(code_action_icon, action.code_action.description, action_index);
-			ungrouped_current_code_actions.push_back(action.code_action);
-			action_index++;
-		}
-	}
+	bool from_tooltip = p_global_pos != Point2i(-1, -1);
+	code_action_popup->set_hide_on_item_selection(!from_tooltip);
 
-	if (action_index == 0) {
-		return;
+	current_code_action_lines = p_lines;
+	current_code_action_global_pos = p_global_pos;
+
+	_update_code_action_popup();
+
+	if (!code_action_popup->is_visible() && ungrouped_current_code_actions.is_empty()) {
+		return; // _update_code_action_popup will hide it if empty.
 	}
 
 	if (p_from_shortcut) {
@@ -2121,16 +2173,57 @@ void CodeTextEditor::popup_code_actions(int p_line, bool p_from_shortcut) {
 		return;
 	}
 
-	// Accessing from the button, so we should just use the button's position
-	// to determine where to place the popup.
-	Rect2 button_rect = _get_code_action_button_inline_rect();
-	Point2 pos = button_rect.position;
-	pos.y += button_rect.size.y;
-	pos = text_editor->get_global_transform_with_canvas().xform(pos);
+	Point2 pos;
+	if (p_global_pos != Point2i(-1, -1)) {
+		// Explicit global position provided (e.g., from a diagnostic tooltip's Quick Fix button).
+		// Anchor around the mouse cursor.
+		code_action_popup->reset_size();
+		Size2i popup_size = code_action_popup->get_size();
 
-	pos += get_window()->get_position();
+		pos.x = p_global_pos.x - popup_size.x / 2.0;
+
+		int offset = 12 * EDSCALE; // Visual offset from the cursor so it doesn't overlap exactly.
+		pos.y = p_global_pos.y + offset;
+
+		// Check if it fits below; if not, place above.
+		int current_screen = get_window()->get_current_screen();
+		Rect2i screen_rect = DisplayServer::get_singleton()->screen_get_usable_rect(current_screen);
+
+		if (pos.y + popup_size.y > screen_rect.position.y + screen_rect.size.y) {
+			pos.y = p_global_pos.y - popup_size.y - offset;
+		}
+	} else {
+		// Accessing from the inline button, so use the button's position.
+		int primary_line = p_lines.is_empty() ? -1 : p_lines[0];
+		Rect2 button_rect = _get_code_action_button_inline_rect(primary_line);
+		pos = button_rect.position;
+		pos.y += button_rect.size.y;
+		pos = text_editor->get_global_transform_with_canvas().xform(pos);
+		pos += get_window()->get_position();
+	}
+
 	code_action_popup->popup(Rect2i(pos, Size2i()));
 	code_action_popup->set_focused_item(1); // The item at index 0 will be the first section's header.
+}
+
+void CodeTextEditor::update_code_action_lines(const Vector<int> &p_lines) {
+	current_code_action_lines = p_lines;
+	if (code_action_popup && code_action_popup->is_visible()) {
+		_update_code_action_popup();
+	}
+}
+
+void CodeTextEditor::_lines_edited_from(int p_from_line, int p_to_line) {
+	int min_line = MIN(p_from_line, p_to_line);
+	int diff = p_to_line - p_from_line;
+	for (int i = 0; i < current_code_action_lines.size(); i++) {
+		if (current_code_action_lines[i] >= min_line) {
+			current_code_action_lines.write[i] += diff;
+			if (current_code_action_lines[i] < min_line) {
+				current_code_action_lines.write[i] = min_line;
+			}
+		}
+	}
 }
 
 void CodeTextEditor::_deferred_popup_code_actions() {
@@ -2285,6 +2378,7 @@ CodeTextEditor::CodeTextEditor() {
 	text_editor->connect(SceneStringName(gui_input), callable_mp(this, &CodeTextEditor::_text_editor_gui_input));
 	text_editor->connect("caret_changed", callable_mp(this, &CodeTextEditor::_line_col_changed));
 	text_editor->connect(SceneStringName(text_changed), callable_mp(this, &CodeTextEditor::_text_changed));
+	text_editor->connect("lines_edited_from", callable_mp(this, &CodeTextEditor::_lines_edited_from));
 	text_editor->connect("code_completion_requested", callable_mp(this, &CodeTextEditor::_complete_request));
 	TypedArray<String> cs = { ".", ",", "(", "=", "$", "@", "\"", "\'" };
 	text_editor->set_code_completion_prefixes(cs);

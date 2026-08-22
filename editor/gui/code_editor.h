@@ -231,14 +231,31 @@ protected:
 	bool show_code_actions = true;
 	PopupMenu *code_action_popup = nullptr;
 	void _on_code_action_id_pressed(int p_id);
-	void popup_code_actions(int p_line, bool p_from_shortcut = false);
-	void _deferred_popup_code_actions();
 	Vector<ScriptLanguage::CodeActionGroupWithDiagnostics> get_code_actions_for_line(int p_line) const;
+
+public:
+	PopupMenu *get_code_action_popup() { return code_action_popup; }
+	void popup_code_actions(const Vector<int> &p_lines, bool p_from_shortcut = false, Point2i p_global_pos = Point2i(-1, -1));
+	void update_code_action_lines(const Vector<int> &p_lines);
+	void popup_code_actions(int p_line, bool p_from_shortcut = false, Point2i p_global_pos = Point2i(-1, -1)) {
+		Vector<int> lines;
+		lines.push_back(p_line);
+		popup_code_actions(lines, p_from_shortcut, p_global_pos);
+	}
+	void _deferred_popup_code_actions();
+
+protected:
+	Vector<int> current_code_action_lines;
+	Point2i current_code_action_global_pos = Point2i(-1, -1);
+	void _lines_edited_from(int p_from_line, int p_to_line);
+
+	void _update_font_size();
+	void _update_code_action_popup();
 
 	Vector<ScriptLanguage::CodeActionGroupWithDiagnostics> code_actions;
 	LocalVector<ScriptLanguage::CodeActionOperation> ungrouped_current_code_actions;
 
-	Rect2 _get_code_action_button_inline_rect() const;
+	Rect2 _get_code_action_button_inline_rect(int p_line = -1) const;
 	void _on_text_editor_draw() const;
 
 	Ref<Texture2D> code_action_dropdown_icon;
@@ -315,8 +332,13 @@ public:
 	void remove_all_bookmarks();
 	void set_code_actions(const Vector<ScriptLanguage::CodeActionGroupWithDiagnostics> &p_actions) {
 		code_actions = p_actions;
+		if (show_code_actions) {
+			text_editor->queue_redraw();
+		}
+		if (code_action_popup && code_action_popup->is_visible() && !current_code_action_lines.is_empty()) {
+			_update_code_action_popup();
+		}
 	}
-
 	void set_zoom_factor(float p_zoom_factor);
 	float get_zoom_factor();
 

@@ -59,9 +59,23 @@
 #include "scene/gui/menu_button.h"
 #include "scene/gui/rich_text_label.h"
 #include "scene/gui/split_container.h"
+#include "scene/gui/texture_rect.h"
 #include "scene/main/scene_tree.h"
 #include "scene/resources/style_box_flat.h"
+#include "servers/display/display_server.h"
 #include "servers/rendering/rendering_server.h"
+
+static void _diagnostic_row_mouse_exited(Control *p_row, Button *p_copy_btn) {
+	if (p_row && p_copy_btn && !p_row->get_global_rect().has_point(p_row->get_global_mouse_position())) {
+		p_copy_btn->set_modulate(Color(1, 1, 1, 0));
+	}
+}
+
+static void _diagnostic_row_mouse_entered(Button *p_copy_btn) {
+	if (p_copy_btn) {
+		p_copy_btn->set_modulate(Color(1, 1, 1, 1));
+	}
+}
 
 void ConnectionInfoDialog::ok_pressed() {
 }
@@ -1104,6 +1118,8 @@ void ScriptTextEditor::_update_errors() {
 			te->set_line_gutter_item_color(i, 1, default_line_number_color);
 		}
 	}
+
+	_update_diagnostic_tooltip();
 }
 
 static Vector<Node *> _find_all_node_for_script(Node *p_base, Node *p_current, const Ref<Script> &p_script) {
@@ -1388,42 +1404,242 @@ void ScriptTextEditor::_validate_symbol(const String &p_symbol) {
 	}
 }
 
+void ScriptTextEditor::_on_diagnostic_copy_pressed(const String &p_text) {
+	DisplayServer::get_singleton()->clipboard_set(p_text);
+	EditorToaster::get_singleton()->popup_str(TTR("Diagnostic message copied to clipboard."), EditorToaster::SEVERITY_INFO);
+}
+
+void ScriptTextEditor::_on_diagnostic_quick_fix_pressed(Button *p_btn) {
+	// Capture the mouse position to anchor the Code Actions popup near the cursor.
+	Point2i mouse_pos = DisplayServer::get_singleton()->mouse_get_position();
+
+	Vector<int> target_lines;
+	for (const ScriptLanguage::ScriptError &e : errors) {
+		if (current_diag_row >= e.start_line - 1 && current_diag_row <= e.end_line - 1) {
+			target_lines.push_back(e.start_line - 1);
+		}
+	}
+	for (const ScriptLanguage::Warning &w : warnings) {
+		if (current_diag_row >= w.start_line - 1 && current_diag_row <= w.end_line - 1) {
+			target_lines.push_back(w.start_line - 1);
+		}
+	}
+
+	code_editor->popup_code_actions(target_lines, false, mouse_pos);
+
+	if (p_btn) {
+		Node *p = p_btn->get_parent();
+		while (p) {
+			EditorHelpBitTooltip *tt = Object::cast_to<EditorHelpBitTooltip>(p);
+			if (tt) {
+				tt->set_attached_popup(code_editor->get_code_action_popup());
+				break;
+			}
+			p = p->get_parent();
+		}
+	}
+}
+
+int ScriptTextEditor::_populate_diagnostic_vbox(VBoxContainer *diag_vbox, int p_row) {
+	int added_count = 0;
+	bool has_quick_fix = false;
+
+	auto add_diagnostic_row = [&](bool p_is_err, const String &p_msg, const String &p_code, int p_target_line) {
+		added_count++;
+		VBoxContainer *row_vbox = memnew(VBoxContainer);
+		row_vbox->add_theme_constant_override("separation", 2 * EDSCALE);
+		diag_vbox->add_child(row_vbox);
+
+		HBoxContainer *main_hbox = memnew(HBoxContainer);
+		main_hbox->add_theme_constant_override("separation", 8 * EDSCALE);
+		row_vbox->add_child(main_hbox);
+
+		RichTextLabel *msg_label = memnew(RichTextLabel);
+		msg_label->add_theme_style_override("normal", memnew(StyleBoxEmpty)); // Remove the default theme background and margins.
+		msg_label->set_use_bbcode(true); // Enable parsing for the severity formatting.
+		msg_label->set_selection_enabled(true);
+		msg_label->set_context_menu_enabled(true);
+		msg_label->set_fit_content(true);
+		msg_label->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+		msg_label->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+		msg_label->set_v_size_flags(Control::SIZE_SHRINK_BEGIN);
+
+		String title_text;
+		Ref<Texture2D> icon_tex;
+		if (p_is_err) {
+			icon_tex = get_editor_theme_icon("StatusError");
+			title_text = TTR("Error:");
+			String color = get_theme_color("error_color", "Editor").to_html();
+			msg_label->add_image(icon_tex, icon_tex->get_width(), icon_tex->get_height());
+			msg_label->add_text("  ");
+			msg_label->append_text(vformat("[color=%s][b]%s[/b][/color] %s", color, title_text, p_msg));
+		} else {
+			icon_tex = get_editor_theme_icon("NodeWarning");
+			title_text = p_code.is_empty() ? TTR("Warning:") : vformat(TTR("Warning (%s):"), p_code);
+			String color = get_theme_color("warning_color", "Editor").to_html();
+			msg_label->add_image(icon_tex, icon_tex->get_width(), icon_tex->get_height());
+			msg_label->add_text("  ");
+			msg_label->append_text(vformat("[color=%s][b]%s[/b][/color] %s", color, title_text, p_msg));
+		}
+
+		Ref<Font> main_font = get_theme_font(SNAME("main"), EditorStringName(EditorFonts));
+		int font_size = get_theme_font_size(SNAME("main_size"), EditorStringName(EditorFonts));
+		Ref<Font> bold_font = get_theme_font(SNAME("bold"), EditorStringName(EditorFonts));
+		float text_width = main_font->get_string_size(p_msg, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x;
+		float title_width = bold_font->get_string_size(title_text + "  ", HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x;
+		float total_width = text_width + title_width + (60 * EDSCALE); // Padding + icon + button width.
+		float max_width = 640 * EDSCALE; // EditorHelpBit native max width.
+		msg_label->set_custom_minimum_size(Size2(MIN(total_width, max_width), 0));
+
+		main_hbox->add_child(msg_label);
+
+		Button *copy_btn = memnew(Button);
+		copy_btn->set_modulate(Color(1, 1, 1, 0)); // Initially visually hidden, but preserves layout space.
+		copy_btn->set_flat(true);
+		copy_btn->set_focus_mode(Control::FOCUS_NONE);
+		copy_btn->set_tooltip_text(TTR("Click to copy."));
+		copy_btn->set_v_size_flags(Control::SIZE_SHRINK_BEGIN);
+		copy_btn->set_button_icon(get_editor_theme_icon(SNAME("ActionCopy")));
+		copy_btn->connect("pressed", callable_mp(this, &ScriptTextEditor::_on_diagnostic_copy_pressed).bind(p_msg));
+		main_hbox->add_child(copy_btn);
+
+		row_vbox->connect("mouse_entered", callable_mp_static(&_diagnostic_row_mouse_entered).bind(copy_btn));
+		row_vbox->connect("mouse_exited", callable_mp_static(&_diagnostic_row_mouse_exited).bind(row_vbox, copy_btn));
+		msg_label->connect("mouse_entered", callable_mp_static(&_diagnostic_row_mouse_entered).bind(copy_btn));
+		msg_label->connect("mouse_exited", callable_mp_static(&_diagnostic_row_mouse_exited).bind(row_vbox, copy_btn));
+		copy_btn->connect("mouse_entered", callable_mp_static(&_diagnostic_row_mouse_entered).bind(copy_btn));
+		copy_btn->connect("mouse_exited", callable_mp_static(&_diagnostic_row_mouse_exited).bind(row_vbox, copy_btn));
+	};
+
+	for (const ScriptLanguage::ScriptError &e : errors) {
+		if (p_row >= e.start_line - 1 && p_row <= e.end_line - 1) {
+			add_diagnostic_row(true, e.message, "", e.start_line - 1);
+		}
+	}
+
+	for (const ScriptLanguage::Warning &w : warnings) {
+		if (p_row >= w.start_line - 1 && p_row <= w.end_line - 1) {
+			add_diagnostic_row(false, w.message, w.string_code, w.start_line - 1);
+			if (!w.string_code.is_empty()) {
+				has_quick_fix = true;
+			}
+		}
+	}
+
+	if (has_quick_fix) {
+		HBoxContainer *bottom_hbox = memnew(HBoxContainer);
+		bottom_hbox->add_theme_constant_override("separation", 4 * EDSCALE);
+		diag_vbox->add_child(bottom_hbox);
+
+		Button *qf_btn = memnew(Button);
+		qf_btn->set_flat(true);
+		qf_btn->set_focus_mode(Control::FOCUS_NONE);
+		qf_btn->set_text(TTR("Quick Fix..."));
+		qf_btn->set_tooltip_text(TTR("Show available code actions."));
+		qf_btn->set_button_icon(get_editor_theme_icon(SNAME("CodeAction")));
+		qf_btn->add_theme_color_override("font_color", get_theme_color("font_color", "Editor") * Color(1, 1, 1, 0.6));
+		qf_btn->connect("pressed", callable_mp(this, &ScriptTextEditor::_on_diagnostic_quick_fix_pressed).bind(qf_btn));
+		bottom_hbox->add_child(qf_btn);
+	}
+
+	return added_count;
+}
+
+void ScriptTextEditor::_on_diag_vbox_tree_exiting() {
+	current_diag_vbox = nullptr;
+	current_diag_row = -1;
+}
+
+void ScriptTextEditor::_lines_edited_from(int p_from_line, int p_to_line) {
+	if (current_diag_vbox) {
+		int min_line = MIN(p_from_line, p_to_line);
+		int diff = p_to_line - p_from_line;
+		if (current_diag_row >= min_line) {
+			current_diag_row += diff;
+			if (current_diag_row < min_line) {
+				current_diag_row = min_line;
+			}
+		}
+	}
+}
+
+void ScriptTextEditor::_update_diagnostic_tooltip() {
+	if (!current_diag_vbox) {
+		return;
+	}
+
+	// Clear all existing rows from the vbox.
+	while (current_diag_vbox->get_child_count() > 0) {
+		Node *child = current_diag_vbox->get_child(0);
+		current_diag_vbox->remove_child(child);
+		child->queue_free();
+	}
+
+	int added_count = _populate_diagnostic_vbox(current_diag_vbox, current_diag_row);
+	if (added_count == 0) {
+		// No diagnostics left, hide/remove the tooltip.
+		Node *p = current_diag_vbox->get_parent();
+		while (p) {
+			EditorHelpBitTooltip *tt = Object::cast_to<EditorHelpBitTooltip>(p);
+			if (tt) {
+				tt->queue_free();
+				break;
+			}
+			p = p->get_parent();
+		}
+	} else {
+		// We still have diagnostics. Update the Code Actions popup so it uses the potentially shifted target lines.
+		Vector<int> target_lines;
+		for (const ScriptLanguage::ScriptError &e : errors) {
+			if (current_diag_row >= e.start_line - 1 && current_diag_row <= e.end_line - 1) {
+				target_lines.push_back(e.start_line - 1);
+			}
+		}
+		for (const ScriptLanguage::Warning &w : warnings) {
+			if (current_diag_row >= w.start_line - 1 && current_diag_row <= w.end_line - 1) {
+				target_lines.push_back(w.start_line - 1);
+			}
+		}
+		code_editor->update_code_action_lines(target_lines);
+
+		Node *p = current_diag_vbox->get_parent();
+		while (p) {
+			EditorHelpBitTooltip *tt = Object::cast_to<EditorHelpBitTooltip>(p);
+			if (tt) {
+				tt->reset_size();
+				break;
+			}
+			p = p->get_parent();
+		}
+	}
+}
+
 void ScriptTextEditor::_show_symbol_tooltip(const String &p_symbol, int p_row, int p_column, bool p_shortcut) {
 	bool enable_docs = EDITOR_GET("text_editor/behavior/documentation/enable_tooltips").booleanize();
 	bool enable_diagnostics = EDITOR_GET("text_editor/behavior/diagnostics/enable_tooltips").booleanize();
 
-	String diagnostic_strings_concatenated;
+	Control *diagnostic_header = nullptr;
+
 	if (enable_diagnostics) {
-		// Look for any errors that include this location.
-		PackedStringArray error_strings;
-		for (const ScriptLanguage::ScriptError &e : errors) {
-			if (_is_line_col_in_range(p_row + 1, p_column + 1, e.start_line, e.start_column, e.end_line, e.end_column)) {
-				error_strings.append(e.message);
-			}
-		}
+		VBoxContainer *diag_vbox = memnew(VBoxContainer);
+		diag_vbox->add_theme_constant_override("separation", 8 * EDSCALE);
 
-		// Look for any warnings that include this location.
-		PackedStringArray warning_strings;
-		for (const ScriptLanguage::Warning &w : warnings) {
-			if (_is_line_col_in_range(p_row + 1, p_column + 1, w.start_line, w.start_column, w.end_line, w.end_column)) {
-				warning_strings.append(vformat("(%s): %s", w.string_code, w.message));
-			}
-		}
+		int added_count = _populate_diagnostic_vbox(diag_vbox, p_row);
 
-		if (!error_strings.is_empty()) {
-			const Color error_color = get_theme_color(SNAME("error_color"), EditorStringName(Editor));
-			diagnostic_strings_concatenated += vformat("[color=%s]", error_color.to_html());
-			diagnostic_strings_concatenated += String("\n").join(error_strings).replace("[", "[lb]");
-			diagnostic_strings_concatenated += "[/color]";
-		}
-		if (!error_strings.is_empty() && !warning_strings.is_empty()) {
-			diagnostic_strings_concatenated += "\n";
-		}
-		if (!warning_strings.is_empty()) {
-			const Color warning_color = get_theme_color(SNAME("warning_color"), EditorStringName(Editor));
-			diagnostic_strings_concatenated += vformat("[color=%s]", warning_color.to_html());
-			diagnostic_strings_concatenated += String("\n").join(warning_strings).replace("[", "[lb]");
-			diagnostic_strings_concatenated += "[/color]";
+		if (added_count > 0) {
+			MarginContainer *diag_margin = memnew(MarginContainer);
+			diag_margin->add_theme_constant_override("margin_left", 8 * EDSCALE);
+			diag_margin->add_theme_constant_override("margin_right", 8 * EDSCALE);
+			diag_margin->add_theme_constant_override("margin_top", 6 * EDSCALE);
+			diag_margin->add_theme_constant_override("margin_bottom", 6 * EDSCALE);
+			diag_margin->add_child(diag_vbox);
+			diagnostic_header = diag_margin;
+
+			current_diag_vbox = diag_vbox;
+			current_diag_row = p_row;
+			diag_vbox->connect(SceneStringName(tree_exiting), callable_mp(this, &ScriptTextEditor::_on_diag_vbox_tree_exiting));
+		} else {
+			memdelete(diag_vbox);
 		}
 	}
 
@@ -1431,15 +1647,15 @@ void ScriptTextEditor::_show_symbol_tooltip(const String &p_symbol, int p_row, i
 	// We can just pop up the tooltip with the diagnostics, if they are enabled (if not, we don't need
 	// to do anything at all).
 	if (!enable_docs || p_symbol.is_empty()) {
-		if (enable_diagnostics) {
-			Control *tmp = EditorHelpBitTooltip::make_tooltip(code_editor->get_text_editor(), String(), String(), true, p_shortcut, diagnostic_strings_concatenated);
+		if (enable_diagnostics && diagnostic_header) {
+			Control *tmp = EditorHelpBitTooltip::make_tooltip(code_editor->get_text_editor(), String(), String(), true, p_shortcut, diagnostic_header);
 			memdelete(tmp);
 		}
 		return;
 	}
 
 	if (p_symbol.begins_with("res://") || p_symbol.begins_with("uid://")) {
-		Control *tmp = EditorHelpBitTooltip::make_tooltip(code_editor->get_text_editor(), "resource||" + p_symbol, String(), false, false, diagnostic_strings_concatenated);
+		Control *tmp = EditorHelpBitTooltip::make_tooltip(code_editor->get_text_editor(), "resource||" + p_symbol, String(), false, false, diagnostic_header);
 		memdelete(tmp);
 		return;
 	}
@@ -1551,8 +1767,8 @@ void ScriptTextEditor::_show_symbol_tooltip(const String &p_symbol, int p_row, i
 		debug_value = TTR("Current value: ") + debug_value.replace("[", "[lb]");
 	}
 
-	if (!doc_symbol.is_empty() || !debug_value.is_empty() || !diagnostic_strings_concatenated.is_empty()) {
-		Control *tmp = EditorHelpBitTooltip::make_tooltip(code_editor->get_text_editor(), doc_symbol, debug_value, true, p_shortcut, diagnostic_strings_concatenated);
+	if (!doc_symbol.is_empty() || !debug_value.is_empty() || diagnostic_header) {
+		Control *tmp = EditorHelpBitTooltip::make_tooltip(code_editor->get_text_editor(), doc_symbol, debug_value, true, p_shortcut, diagnostic_header);
 		memdelete(tmp);
 	}
 }
@@ -2737,6 +2953,8 @@ ScriptTextEditor::ScriptTextEditor() {
 
 	code_editor->get_text_editor()->set_draw_breakpoints_gutter(true);
 	code_editor->get_text_editor()->set_draw_executing_lines_gutter(true);
+
+	code_editor->get_text_editor()->connect("lines_edited_from", callable_mp(this, &ScriptTextEditor::_lines_edited_from));
 	code_editor->get_text_editor()->connect("caret_changed", callable_mp(this, &ScriptTextEditor::_on_caret_moved));
 	code_editor->connect("navigation_preview_ended", callable_mp(this, &ScriptTextEditor::_on_caret_moved));
 

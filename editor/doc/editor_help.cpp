@@ -5055,6 +5055,11 @@ void EditorHelpBitTooltip::_notification(int p_what) {
 			// A workaround to hide the tooltip since the window does not receive keyboard events
 			// with `FLAG_POPUP` and `FLAG_NO_FOCUS` flags, so we can't use `_input_from_window()`.
 			if (is_inside_tree()) {
+				bool popup_has_mouse = false;
+				if (attached_popup && attached_popup->is_visible() && Rect2i(attached_popup->get_position(), attached_popup->get_size()).has_point(DisplayServer::get_singleton()->mouse_get_position())) {
+					popup_has_mouse = true;
+				}
+
 				if (Input::get_singleton()->is_action_just_pressed(SNAME("ui_cancel"), true)) {
 					queue_free();
 					get_parent_viewport()->set_input_as_handled();
@@ -5063,12 +5068,14 @@ void EditorHelpBitTooltip::_notification(int p_what) {
 						queue_free();
 					}
 				} else if (!Input::get_singleton()->get_mouse_button_mask().is_empty()) {
-					if (!_is_mouse_inside_tooltip && !_is_shortcut_pressed) {
+					if (!_is_mouse_inside_tooltip && !_is_shortcut_pressed && !popup_has_mouse) {
 						queue_free();
 					}
 				} else if (!Input::get_singleton()->get_last_mouse_velocity().is_zero_approx()) {
-					if (!_is_mouse_inside_tooltip && OS::get_singleton()->get_ticks_msec() - _enter_tree_time > 350) {
+					if (!_is_mouse_inside_tooltip && !popup_has_mouse && OS::get_singleton()->get_ticks_msec() - _enter_tree_time > 350) {
 						_start_timer();
+					} else if (popup_has_mouse) {
+						timer->stop();
 					}
 				}
 			}
@@ -5076,37 +5083,37 @@ void EditorHelpBitTooltip::_notification(int p_what) {
 	}
 }
 
-Control *EditorHelpBitTooltip::make_tooltip(
-		Control *p_target,
-		const String &p_symbol,
-		const String &p_prologue,
-		bool p_use_class_prefix,
-		bool p_shortcut,
-		const String &p_diagnostics) {
-	ERR_FAIL_NULL_V(p_target, _make_invisible_control());
+Control *EditorHelpBitTooltip::make_tooltip(Control *p_target, const String &p_symbol, const String &p_prologue, bool p_use_class_prefix, bool p_shortcut, Control *p_custom_header) {
+	if (!p_target) {
+		if (p_custom_header) {
+			memdelete(p_custom_header);
+		}
+		ERR_FAIL_V(_make_invisible_control());
+	}
 
 	// Show the custom tooltip only if it is not already visible.
 	// The viewport will retrigger `make_custom_tooltip()` every few seconds
 	// because the return control is not visible even if the custom tooltip is displayed.
 	if (_is_tooltip_visible || (!p_shortcut && Input::get_singleton()->is_anything_pressed())) {
+		if (p_custom_header) {
+			memdelete(p_custom_header);
+		}
 		return _make_invisible_control();
 	}
 
 	EditorHelpBitTooltip *tooltip = memnew(EditorHelpBitTooltip(p_target, p_shortcut));
 
-	bool has_diagnostics = !p_diagnostics.is_empty();
 	bool has_doc_tooltip = !p_symbol.is_empty() || !p_prologue.is_empty();
 
-	if (has_diagnostics) {
-		tooltip->diagnostics_label->set_text(p_diagnostics);
-	} else {
-		tooltip->diagnostics_label->hide();
+	if (p_custom_header) {
+		tooltip->vbox->add_child(p_custom_header);
 	}
 
 	if (has_doc_tooltip) {
 		EditorHelpBit *help_bit = memnew(EditorHelpBit(p_symbol, p_prologue, p_use_class_prefix, false, true));
 		help_bit->connect("request_hide", callable_mp(static_cast<Node *>(tooltip), &Node::queue_free));
 		tooltip->vbox->add_child(help_bit);
+
 		help_bit->update_content_height();
 	}
 
@@ -5173,17 +5180,7 @@ EditorHelpBitTooltip::EditorHelpBitTooltip(Control *p_target, bool p_shortcut) {
 
 	set_theme_type_variation("TooltipPanel");
 
-	diagnostics_label = memnew(RichTextLabel);
-	diagnostics_label->set_theme_type_variation("EditorHelpBitTooltipTitle");
-	diagnostics_label->set_custom_minimum_size(Size2(640 * EDSCALE, 0)); // GH-93031. Set the minimum width even if `fit_content` is true.
-	diagnostics_label->set_fit_content(true);
-	diagnostics_label->set_selection_enabled(true);
-	diagnostics_label->set_context_menu_enabled(false);
-	diagnostics_label->set_use_bbcode(true);
-
 	vbox = memnew(VBoxContainer);
-	vbox->add_child(diagnostics_label);
-
 	add_child(vbox);
 
 	timer = memnew(Timer);
